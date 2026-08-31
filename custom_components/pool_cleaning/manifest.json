@@ -1,0 +1,11 @@
+{
+  "domain": "pool_cleaning",
+  "name": "Pool Cleaning Reports",
+  "codeowners": ["@anubis1906"],
+  "config_flow": true,
+  "documentation": "https://github.com/anubis1906/pool-cleaning",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/anubis1906/pool-cleaning/issues",
+  "requirements": ["beautifulsoup4>=4.12.0"],
+  "version": "0.1.0"
+}

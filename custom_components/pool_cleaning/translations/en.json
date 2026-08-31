@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to your mailbox",
+        "description": "Home Assistant will log in over IMAP and look for weekly pool-service report emails.",
+        "data": {
+          "host": "IMAP server",
+          "port": "Port",
+          "username": "Username / email address",
+          "password": "Password (use an app password if your provider requires one)",
+          "folder": "Folder to search",
+          "sender": "Only look at emails from this address (optional, recommended)",
+          "use_ssl": "Use SSL",
+          "mark_seen": "Mark processed emails as read"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the IMAP server. Check the host, port and SSL setting.",
+      "invalid_auth": "Login failed. Check the username and password."
+    },
+    "abort": {
+      "already_configured": "This mailbox is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "How often to check for new mail (minutes)",
+          "mark_seen": "Mark processed emails as read"
+        }
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh",
+      "description": "Check the mailbox immediately for a new pool-service report instead of waiting for the next scheduled poll."
+    }
+  }
+}

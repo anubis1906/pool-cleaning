@@ -1,0 +1,5 @@
+refresh:
+  name: Refresh
+  description: >-
+    Check the mailbox immediately for a new pool-service report instead of
+    waiting for the next scheduled poll.
