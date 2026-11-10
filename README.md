@@ -12,17 +12,18 @@ that are already being sent there.
 ## How it works
 
 1. On a schedule (default every 60 minutes, configurable), the integration
-   logs into your mailbox over IMAP and searches for emails from the sender
-   address you configured.
-2. The newest unseen matching email is parsed. HA doesn't rely on exact
-   markup - it walks the report's text in order and recognises the
-   `POOL`/`SPA` section headers, the `CHEMICAL READINGS` and
-   `CHEMICALS ADDED` tables, the job date/arrival/technician line, the
-   customer address link, the "wait N hours" warning banner, and any
-   before/after photos.
-3. Home Assistant entities are created/updated from the parsed data. The
-   integration remembers the last email UID it processed (in HA's storage)
-   so it never reprocesses the same report.
+   logs into your mailbox over IMAP and finds the newest email from the
+   sender address you configured.
+2. That email is parsed every time it's fetched (not just the first time
+   it's seen). HA doesn't rely on exact markup - it walks the report's text
+   in order and recognises the `POOL`/`SPA` section headers, the
+   `CHEMICAL READINGS` and `CHEMICALS ADDED` tables, the job
+   date/arrival/technician line, the customer address link, the "wait N
+   hours" warning banner, and any before/after photos.
+3. Home Assistant entities are created/updated from the parsed data. Always
+   re-fetching the newest matching email, rather than only reacting to
+   brand-new ones, keeps this restart-proof: entity state doesn't depend on
+   anything Home Assistant has to remember between restarts.
 
 ## Installation
 

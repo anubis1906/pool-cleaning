@@ -1,4 +1,4 @@
-"""DataUpdateCoordinator that polls IMAP for new pool-service report emails."""
+"""DataUpdateCoordinator that polls IMAP for the latest pool-service report."""
 from __future__ import annotations
 
 import email
@@ -9,7 +9,6 @@ from email.message import Message
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
@@ -24,19 +23,21 @@ from .const import (
 from .parser import ServiceReport, parse_report_email
 
 _LOGGER = logging.getLogger(__name__)
-_STORAGE_VERSION = 1
 
 
 class PoolCleaningCoordinator(DataUpdateCoordinator[ServiceReport]):
-    """Polls the mailbox and keeps the latest parsed report."""
+    """Polls the mailbox and keeps the latest parsed report.
+
+    Every poll re-fetches and re-parses whichever matching email currently
+    has the highest IMAP UID, rather than only acting on mail newer than a
+    remembered UID. That keeps this restart-proof: the mailbox itself is
+    the single source of truth, so there's nothing to lose when the
+    coordinator (and its in-memory data) is recreated on a Home Assistant
+    restart. Re-parsing the same email weekly is negligible cost.
+    """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.entry = entry
-        self._store: Store = Store(
-            hass, _STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_last_uid"
-        )
-        self._last_uid = 0
-        self._last_uid_loaded = False
         scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         super().__init__(
             hass,
@@ -45,37 +46,25 @@ class PoolCleaningCoordinator(DataUpdateCoordinator[ServiceReport]):
             update_interval=timedelta(minutes=scan_interval),
         )
 
-    async def _async_load_last_uid(self) -> None:
-        stored = await self._store.async_load()
-        if stored:
-            self._last_uid = stored.get("last_uid", 0)
-        self._last_uid_loaded = True
-
-    async def _async_save_last_uid(self) -> None:
-        await self._store.async_save({"last_uid": self._last_uid})
-
     async def _async_update_data(self) -> ServiceReport:
-        if not self._last_uid_loaded:
-            await self._async_load_last_uid()
-
         try:
-            result = await self.hass.async_add_executor_job(self._fetch_latest_email)
+            html = await self.hass.async_add_executor_job(self._fetch_latest_email)
         except (imaplib.IMAP4.error, OSError) as err:
             raise UpdateFailed(f"Error communicating with IMAP server: {err}") from err
 
-        if result is None:
-            # No new email since the last check; keep showing the previous data.
+        if html is None:
+            # No matching email found at all; keep showing whatever we had.
+            return self.data if self.data is not None else ServiceReport()
+
+        try:
+            return parse_report_email(html)
+        except Exception as err:  # noqa: BLE001 - one odd email shouldn't take every entity offline
+            _LOGGER.exception("Failed to parse the latest pool-service report email")
             if self.data is not None:
                 return self.data
-            return ServiceReport()
+            raise UpdateFailed(f"Failed to parse report email: {err}") from err
 
-        uid, html = result
-        report = parse_report_email(html)
-        self._last_uid = uid
-        await self._async_save_last_uid()
-        return report
-
-    def _fetch_latest_email(self) -> tuple[int, str] | None:
+    def _fetch_latest_email(self) -> str | None:
         """Blocking IMAP fetch, run in the executor."""
         data = self.entry.data
         host = data["host"]
@@ -98,11 +87,10 @@ class PoolCleaningCoordinator(DataUpdateCoordinator[ServiceReport]):
                 return None
 
             uids = [int(u) for u in search_data[0].split()]
-            new_uids = [u for u in uids if u > self._last_uid]
-            if not new_uids:
+            if not uids:
                 return None
+            latest_uid = max(uids)
 
-            latest_uid = max(new_uids)
             typ, msg_data = conn.uid("fetch", str(latest_uid), "(RFC822)")
             if typ != "OK" or not msg_data or msg_data[0] is None:
                 return None
@@ -115,13 +103,12 @@ class PoolCleaningCoordinator(DataUpdateCoordinator[ServiceReport]):
                     "Latest matching email (uid %s) had no HTML body to parse",
                     latest_uid,
                 )
-                self._last_uid = latest_uid
                 return None
 
             if mark_seen:
                 conn.uid("store", str(latest_uid), "+FLAGS", "\\Seen")
 
-            return latest_uid, html
+            return html
         finally:
             try:
                 conn.close()
