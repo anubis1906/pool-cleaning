@@ -18,7 +18,7 @@ import logging
 import re
 from datetime import date, datetime, time
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ _JOB_DATE_RE = re.compile(r"Job Date:\s*([\d/]+)", re.IGNORECASE)
 _ARRIVAL_RE = re.compile(r"Arrival:\s*([\d:]+\s*[AP]M)", re.IGNORECASE)
 _TECHNICIAN_RE = re.compile(r"Technician:\s*", re.IGNORECASE)
 _WAIT_HOURS_RE = re.compile(r"wait at least (\d+(?:\.\d+)?)\s*hours?", re.IGNORECASE)
+_ADDRESS_RE = re.compile(r"\d+\s+.+,\s*[A-Z]{2}\s*\d{5}(?:-\d{4})?")
 
 
 def slugify(text: str) -> str:
@@ -168,34 +169,44 @@ def _parse_label_value_sections(tokens: list[str]) -> dict[str, dict[str, Chemic
     return result
 
 
-def _find_customer_and_address(soup: BeautifulSoup) -> tuple[str | None, str | None]:
-    address = None
+def _find_customer_and_address(
+    soup: BeautifulSoup, tokens: list[str]
+) -> tuple[str | None, str | None]:
+    # Preferred: the address is a link (e.g. to a maps provider).
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if "maps.google" in href or "maps.apple" in href or "goo.gl/maps" in href:
-            address = a.get_text(" ", strip=True)
-            break
-    if address is None:
-        # Fall back: any link whose text looks like a street address.
-        for a in soup.find_all("a", href=True):
-            text = a.get_text(" ", strip=True)
-            if re.search(r"\d+.+,\s*[A-Za-z]+,?\s*[A-Z]{2}\s*\d{5}", text):
-                address = text
-                break
+        text = a.get_text(" ", strip=True)
+        if ("maps.google" in href or "maps.apple" in href or "goo.gl/maps" in href) or (
+            _ADDRESS_RE.search(text)
+        ):
+            address = text
+            customer_name = None
+            container = a.parent
+            if container is not None:
+                texts = [t.strip() for t in container.find_all(string=True) if t.strip()]
+                if texts and texts[0] != address:
+                    customer_name = texts[0]
+            return customer_name, address
 
-    customer_name = None
-    if address is not None:
-        # Look for the nearest preceding bold/strong text within the same container.
-        container = None
-        for a in soup.find_all("a", href=True):
-            if a.get_text(" ", strip=True) == address:
-                container = a.parent
-                break
-        if container is not None:
-            texts = [t.strip() for t in container.find_all(string=True) if t.strip()]
-            if texts and texts[0] != address:
-                customer_name = texts[0]
-    return customer_name, address
+    # Fall back: plain text matching an address shape (most templates don't
+    # actually link the address). The customer name is typically the text
+    # token immediately before it, e.g. "Brandon Williams" / "123 Main St...".
+    for i, tok in enumerate(tokens):
+        if _ADDRESS_RE.search(tok):
+            address = tok
+            customer_name = None
+            if i > 0:
+                prev = tokens[i - 1]
+                if (
+                    prev.upper() not in _AREA_HEADERS
+                    and prev.upper() not in _SECTION_HEADERS
+                    and prev.upper() not in _IGNORE_TOKENS
+                    and len(prev) <= 60
+                ):
+                    customer_name = prev
+            return customer_name, address
+
+    return None, None
 
 
 def _find_warning_text(soup: BeautifulSoup) -> str | None:
@@ -206,42 +217,71 @@ def _find_warning_text(soup: BeautifulSoup) -> str | None:
     return None
 
 
-def _find_photos(soup: BeautifulSoup, areas: dict[str, AreaReport]) -> None:
-    """Best-effort: associate <img> tags with the nearest area and a
-    before/after label found in surrounding text."""
+_PHOTO_LABEL_WINDOW = 4
+
+
+def _ordered_text_and_images(soup: BeautifulSoup) -> list[tuple[str, str]]:
+    """Walk the document once, yielding ('text', value) and ('img', src)
+    events in document order (skipping tags with no src/empty text)."""
+    events: list[tuple[str, str]] = []
+    for node in soup.descendants:
+        if isinstance(node, NavigableString):
+            text = str(node).strip()
+            if text:
+                events.append(("text", text))
+        elif getattr(node, "name", None) == "img":
+            src = node.get("src")
+            if src:
+                events.append(("img", src))
+    return events
+
+
+def _find_photos(areas: dict[str, AreaReport], events: list[tuple[str, str]]) -> None:
+    """Best-effort: associate <img> events with the area most recently seen
+    before them, and a before/after label found a few events away. An image
+    with no nearby before/after label (a logo, a rating icon, a tracking
+    pixel, ...) is skipped rather than guessed at. Ancestor-based proximity
+    doesn't work here: these report emails are one deeply nested table, so
+    climbing even a few DOM levels up from an image can pull in text from
+    unrelated, much-later sections. Document-order distance avoids that."""
     if not areas:
         return
     area_names = list(areas.keys())
-    for img in soup.find_all("img"):
-        src = img.get("src")
-        if not src:
+    current_area = area_names[0]
+
+    for idx, (kind, value) in enumerate(events):
+        if kind == "text":
+            if value.upper() in _AREA_HEADERS:
+                current_area = value.upper().title()
             continue
-        # Walk up to find the nearest ancestor that also contains an area
-        # header, and the nearest before/after label near the image.
+
         label = None
-        area_name = area_names[-1]
-        node = img
-        for _ in range(6):
-            node = node.parent
-            if node is None:
-                break
-            text = node.get_text(" ", strip=True).upper()
-            if label is None:
-                if "AFTER" in text:
+        for distance in range(1, _PHOTO_LABEL_WINDOW + 1):
+            # Check forward first: in practice the before/after badge comes
+            # right after the image, not before it, and at equal distance
+            # we want our own badge, not a neighbouring image's.
+            for j in (idx + distance, idx - distance):
+                if j < 0 or j >= len(events) or events[j][0] != "text":
+                    continue
+                nearby_upper = events[j][1].upper()
+                if "AFTER" in nearby_upper:
                     label = "after"
-                elif "BEFORE" in text:
+                elif "BEFORE" in nearby_upper:
                     label = "before"
-            for area in area_names:
-                if area.upper() in text:
-                    area_name = area
+                if label is not None:
                     break
+            if label is not None:
+                break
         if label is None:
-            label = "after"
-        area_report = areas[area_name]
+            continue
+
+        area_report = areas.get(current_area)
+        if area_report is None:
+            continue
         if label == "before" and area_report.photo_before is None:
-            area_report.photo_before = src
-        elif area_report.photo_after is None:
-            area_report.photo_after = src
+            area_report.photo_before = value
+        elif label == "after" and area_report.photo_after is None:
+            area_report.photo_after = value
 
 
 def parse_report_email(html: str) -> ServiceReport:
@@ -277,7 +317,7 @@ def parse_report_email(html: str) -> ServiceReport:
     if report.warning_text and (m := _WAIT_HOURS_RE.search(report.warning_text)):
         report.wait_hours = float(m.group(1))
 
-    report.customer_name, report.address = _find_customer_and_address(soup)
+    report.customer_name, report.address = _find_customer_and_address(soup, tokens)
 
     parsed = _parse_label_value_sections(tokens)
 
@@ -288,7 +328,7 @@ def parse_report_email(html: str) -> ServiceReport:
         )
         report.areas[area_name] = area_report
 
-    _find_photos(soup, report.areas)
+    _find_photos(report.areas, _ordered_text_and_images(soup))
 
     if not report.areas:
         _LOGGER.debug(

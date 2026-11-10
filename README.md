@@ -51,7 +51,10 @@ You'll need:
   company's report emails (forwarded from your real inbox) also works well
   and keeps the scope of access minimal.
 - **Sender address** (recommended) - restrict matching to emails from your
-  pool company so nothing else in the inbox is parsed.
+  pool company so nothing else in the inbox is parsed. Use the actual
+  `From:` address, not a `Reply-To:` address - for example, PoolBrain-based
+  report emails come from `notify@poolbrain.com`, even though replies go to
+  the pool company's own address.
 
 Afterwards, use the integration's "Configure" option to change the polling
 interval or whether processed emails are marked as read.
